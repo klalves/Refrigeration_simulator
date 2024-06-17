@@ -33,6 +33,10 @@ class RefrigerationSystem:
         self.mass["condenser_refigerant"] = self.refrigerant_mass_total - self.mass["evaporator_refrigerant"]
 
     def simulate(self, time_step_s):
+        #Input values
+        power = {}
+        power["compressor"] = 1.0
+
         #Calculate auxiliary variables
 
         delta_energy = {}
@@ -45,9 +49,10 @@ class RefrigerationSystem:
         delta_energy["condenser_air"] = self.time_step * \
                                         (self.heat_transfer_rate_get("ambient", "condenser_air") + \
                                          self.heat_transfer_rate_get("condenser_refrigerant", "condenser_air"))
-        
+        delta_energy["compressor"] = self.time_step * power["compressor"]
         delta_energy["subcooling"] = self.time_step * \
-                                     (self.heat_transfer_rate_get("condenser_refrigerant", "condenser_air") - \
+                                     (self.heat_transfer_rate_get("evaporator_air", "evaporator_refrigerant") + \
+                                      power["compressor"] -\
                                       self.heat_transfer_rate_get("condenser_refrigerant", "condenser_air"))
     
 
