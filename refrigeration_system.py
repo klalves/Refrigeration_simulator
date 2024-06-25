@@ -145,10 +145,15 @@ class RefrigerationSystem:
         tmp_c = -self.enthalpy["evaporator_refrigerant"]*delta_mass["evaporator_refrigerant"]
         delta_enthalpy["evaporator_refrigerant"] = time_step*(tmp_a + tmp_b + tmp_c)/self.mass["evaporator_refrigerant"]
 
-        tmp_a = (self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")]*self.enthalpy["condenser_in"] - \
-                 self.heat_capacity_rate[self.coupling_key("expansion_valve", "refrigerant")]*self.enthalpy["condenser_out"]) / self.cpr
-        tmp_b = -(self.heat_transfer_rate_get("evaporator_air","evaporator_refrigerant") + power["compressor"])
-        tmp_c = -self.enthalpy["condenser_refrigerant"]*delta_mass["condenser_refrigerant"]
+        if(self.compressor_speed == 0):
+            tmp_a = 0
+            tmp_b = (self.heat_transfer_rate_get("condenser_air","condenser_refrigerant"))
+            tmp_c = 0
+        else:
+            tmp_a = (self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")]*self.enthalpy["condenser_in"] - \
+                    self.heat_capacity_rate[self.coupling_key("expansion_valve", "refrigerant")]*self.enthalpy["condenser_out"]) / self.cpr
+            tmp_b = -(self.heat_transfer_rate_get("evaporator_air","evaporator_refrigerant") + power["compressor"])
+            tmp_c = -self.enthalpy["condenser_refrigerant"]*delta_mass["condenser_refrigerant"]
         delta_enthalpy["condenser_refrigerant"] = time_step*(tmp_a + tmp_b + tmp_c)/self.mass["condenser_refrigerant"]
 
         c4 = self.a4*(1-refrigerant_quality["evaporator_refrigerant"]) + \
