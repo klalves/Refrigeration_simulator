@@ -9,6 +9,9 @@ class RefrigerationSystem:
         # U - Global heat transfer coefficient, W*m^-2*K^-1
         self.global_heat_transfer_coefficient = 10
 
+        # Universal gas constant, J*kmol^-1*K^-1
+        self.R = 8314
+
         # Specific heat measured in J/(Kg*K) 
         self.specific_heat = {}
         self.specific_heat["compartment"] = 1500
@@ -21,6 +24,7 @@ class RefrigerationSystem:
         #Compressor constants
         self.c0 = 0.05
         self.n = 1.1
+        self.cv = 1.1
 
         # Heat capacity rates (thermal coupling) measured in W/K 
         self.heat_capacity_rate = {}
@@ -83,9 +87,13 @@ class RefrigerationSystem:
         # compressor_volumetric_efficiency
         nv = 1 + self.c0 - self.c0*(pressure["condenser_refrigerant"]/pressure["evaporator_refrigerant"])**(1/self.n)
 
-        self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")] = 0.00
         power = {}
-        power["compressor"] = 0.0
+        power["compressor"] = (self.n/(1-self.n))*nv*pressure["evaporator_refrigerant"]*self.compressor_speed*(1-((pressure["condenser_refrigerant"]/pressure["evaporator_refrigerant"])**(self.n-1/self.n)))
+
+        a = (27*self.R*(self.Tcrit**2))/(64*self.Pcrit)
+        b = self.R*self.Tcrit/(8*self.Pcrit)
+        specific_volume["evaporator_out"] = self.calculate_evap_out_volume(pressure["evaporator_refrigerant"], self.temperature_k["evaporator_refrigerant"], a, b, self.R/1000)
+        self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")] = ((nv*self.cv)/specific_volume["evaporator_out"])*self.compressor_speed
 
 
         #Calculate auxiliary variables
@@ -282,6 +290,24 @@ class RefrigerationSystem:
 
             self.cpr = 0.9
 
+    def calculate_evap_out_volume(self, P, T, a, b, R):
+        # Coefficients for the cubic equation PV_m^3 - (RT + Pb)V_m^2 + aV_m - ab = 0
+        A = P
+        B = -(R * T + P * b)
+        C = a
+        D = -a * b
+
+        # Coefficients array for the polynomial
+        coefficients = [A, B, C, D]
+
+        # Finding the roots of the cubic equation
+        roots = np.roots(coefficients)
+
+        # Return the real roots (ignoring complex roots)
+        real_roots = [root.real for root in roots if np.isreal(root)]
+
+        return real_roots[0]
+
 # Example usage:
 if __name__ == "__main__":
     simulator = RefrigerationSystem("R134a")
@@ -298,6 +324,8 @@ if __name__ == "__main__":
 
     # Simulate heat transfer for 100 time steps
     for i in range(num_steps):
+        if i>20000:
+            simulator.compressor_speed = 2000
         simulator.simulate(time_step)
         t_compartment[i] = simulator.temperature_k["compartment"]-273.15
         t_evaporator_refrigerant[i] = simulator.temperature_k["evaporator_refrigerant"]-273.15
