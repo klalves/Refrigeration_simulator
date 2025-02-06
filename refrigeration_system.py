@@ -1,350 +1,279 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
+
+parser = argparse.ArgumentParser(description='Refrigeration simulator')
+
+parser.add_argument('--system', choices=['house_refrigerator', 'frozen_island', 'bottle_cooler', 'vertical_freezer', 'medical'], required=True)
+parser.add_argument('--control', choices=['ON_OFF', 'VCC'], required=True)
 
 class RefrigerationSystem:
-    def __init__(self, refrigerant):
-        self.refrigerant_selection(refrigerant)
+ 
+    def __init__(self, system_type, control_type):
         #Constants
+        self.define_system_type(system_type)
 
-        # U - Global heat transfer coefficient, W*m^-2*K^-1
-        self.global_heat_transfer_coefficient = 10
-
-        # Universal gas constant, J*kmol^-1*K^-1
-        self.R = 8314
-
-        # Specific heat measured in J/(Kg*K) 
-        self.specific_heat = {}
-        self.specific_heat["compartment"] = 1500
-        self.specific_heat["evaporator_air"] = 716
-        self.specific_heat["condenser_air"] = 716
-
-        self.expansion_valve_area = 10e-6
-        self.csi = self.cpr/self.global_heat_transfer_coefficient
-
-        #Compressor constants
-        self.c0 = 0.05
-        self.n = 1.1
-        self.cv = 1.1
-
-        # Heat capacity rates (thermal coupling) measured in W/K 
-        self.heat_capacity_rate = {}
-        self.heat_capacity_rate[self.coupling_key("compartment", "evaporator_air")] = 0.419
-        self.heat_capacity_rate[self.coupling_key("compartment", "ambient")] = 0.1
-        self.heat_capacity_rate[self.coupling_key("evaporator_air", "evaporator_refrigerant")] = 0.32
-        self.heat_capacity_rate[self.coupling_key("condenser_air", "condenser_refrigerant")] = 0.64
-        self.heat_capacity_rate[self.coupling_key("condenser_air", "ambient")] = 0.419
-
-        self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")] = 0.00
-        self.heat_capacity_rate[self.coupling_key("expansion_valve", "refrigerant")] = 0.00
+        
+        if (control_type == "ON_OFF" or control_type == "VCC"):
+            self.control_type = control_type
+        else:
+            raise Exception("Invalid control type: " + str(control_type))
 
         #Initial state
-        self.temperature_k = {}
-        self.temperature_k["ambient"] = 298.15
-        self.temperature_k["compartment"] = 298.15 - 20
-        self.temperature_k["evaporator_air"] = 298.15 -35
-        self.temperature_k["evaporator_refrigerant"] = 298.15 -45
-        self.temperature_k["condenser_air"] = 298.15 +10
-        self.temperature_k["condenser_refrigerant"] = 298.15 + 20
-        self.temperature_k["condenser_out"] = self.temperature_k["condenser_refrigerant"]
+        self.temperature = {}
+        self.temperature["ambient"] = 25
+        self.temperature["cabinet_1"] = self.setpoint_1 + self.hysteresis_1
+        self.temperature["cabinet_2"] = self.setpoint_2 + self.hysteresis_2
+        self.temperature["food_1"] = self.temperature["cabinet_1"]
+        self.temperature["food_2"] = self.temperature["cabinet_2"]
+        
+        self.voltage_fault_state = False
+        self.voltage_fault_duration_s = 0
+        self.voltage_fault_duration_trigger_s = 60
 
-        self.refrigerant_mass_total = 2.0
-        self.mass = {}
-        self.mass["compartment"] = 1.0
-        self.mass["evaporator_air"] = 0.2
-        self.mass["condenser_air"] = 0.2
-        self.mass["evaporator_refrigerant"] = 0.5*self.refrigerant_mass_total
-        self.mass["condenser_refrigerant"] = self.refrigerant_mass_total - self.mass["evaporator_refrigerant"]
-
-        self.enthalpy = {}
-        self.enthalpy["evaporator_refrigerant"] = 0
-        self.enthalpy["condenser_refrigerant"] = 0
+        #Static variables
+        self.time_below_setpoint_s = 0
+        self.vcc_is_active = 0
 
         #Control actions
         self.compressor_speed = 0
-        self.expansion_valve_level = 0
+        self.cabinet_1_door_state = 0
+        self.cabinet_2_door_state = 0
+        self.damper_action = 0
+
+        #Powers
+        self.power = {}
+        self.power["compressor"] = 0
+
+        # Specific heat measured in J/(Kg*K) 
+        self.specific_heat = {}
+        self.specific_heat["ambient"] = 1500
+        self.specific_heat["cabinet_1"] = 1500
+        self.specific_heat["cabinet_2"] = 1500
+        self.specific_heat["food_1"] = 4184
+        self.specific_heat["food_2"] = 4184
+        
+        # Heat capacity rates (thermal coupling) measured in W/K 
+        self.heat_capacity_rate = {}
+        self.calculate_heat_capacity_rates()
+
+    def define_system_type(self, system_type):
+        if(system_type == "house_refrigerator"):
+            self.setpoint_1 = -18
+            self.hysteresis_1 = 2
+            self.setpoint_2 = 4
+            self.hysteresis_2 = 2
+            self.Kp = 1000
+            self.Ki = 1
+            self.stab_time = 240
+
+            self.compressor_max_power = 250
+
+            self.mass = {}
+            self.mass["ambient"] = 10000
+            self.mass["cabinet_1"] = 0.1
+            self.mass["cabinet_2"] = 0.5
+            self.mass["food_1"] = 5.0
+            self.mass["food_2"] = 5.0
+        elif(system_type == "vertical_freezer"):
+            self.setpoint_1 = -20
+            self.hysteresis_1 = 2
+            self.setpoint_2 = 4
+            self.hysteresis_2 = 2
+            self.Kp = 800
+            self.Ki = 1
+            self.stab_time = 120
+
+            self.compressor_max_power = 350
+
+            self.mass = {}
+            self.mass["ambient"] = 10000
+            self.mass["cabinet_1"] = 0.5
+            self.mass["cabinet_2"] = 0
+            self.mass["food_1"] = 20.0
+            self.mass["food_2"] = 0
+        else:
+            raise Exception("Invalid system type: " + str(system_type))
+        
+        self.max_speed = 4500
+        self.min_speed = 1200
+        if(self.Ki > 0):
+            self.integral_error = (self.max_speed-self.min_speed)/self.Ki
+        else:
+            self.integral_error = 0
+        
+    def on_off_control(self):
+        if self.temperature["cabinet_1"] < self.setpoint_1:
+            self.compressor_speed = 0
+        elif self.temperature["cabinet_1"] > self.setpoint_1 + self.hysteresis_1:
+            self.compressor_speed = self.max_speed
+
+        if self.temperature["cabinet_2"] < self.setpoint_2:
+            self.damper_action = 0
+        elif self.temperature["cabinet_2"] > self.setpoint_2 + self.hysteresis_2:
+            self.damper_action = 1
+
+    def vcc_control(self, time_step_s):
+        if self.vcc_is_active:
+            self.cycle_duration_s += time_step_s
+
+            error = self.temperature["cabinet_1"] - self.setpoint_1
+
+            if(error > 0):
+                self.integral_error += error
+            else:
+                self.integral_error += 20*error
+
+            if(self.integral_error*self.Ki > self.max_speed-self.min_speed):
+                self.integral_error = (self.max_speed-self.min_speed)/self.Ki
+            elif self.integral_error < 0:
+                self.integral_error = 0
+
+            p_component = self.Kp*error
+            i_component = self.Ki*self.integral_error
+
+            self.compressor_speed = self.min_speed + p_component + i_component
+
+            if(self.compressor_speed > self.max_speed):
+                self.compressor_speed = self.max_speed
+            elif(self.compressor_speed < self.min_speed):
+                self.compressor_speed = self.min_speed
+
+            if self.temperature["cabinet_1"] < self.setpoint_1 + 0.05:
+                self.time_below_setpoint_s += time_step_s
+                if self.time_below_setpoint_s > self.stab_time*60:
+                    self.vcc_is_active = 0
+        else:
+            self.time_below_setpoint_s = 0
+            self.compressor_speed = 0
+            self.cycle_duration_s = 0
+            
+            if self.temperature["cabinet_1"] > self.setpoint_1 + self.hysteresis_1:
+                self.vcc_is_active = 1
+            
+        if self.temperature["cabinet_2"] < self.setpoint_2:
+            self.damper_action = 0
+        elif self.temperature["cabinet_2"] > self.setpoint_2 + self.hysteresis_2:
+            self.damper_action = 1
+    
+    def variable_reference(self):
+        if(self.cycle_duration_s > self.tto*60):
+            dynamic_reference = self.setpoint_1
+        else:
+            dynamic_reference = self.setpoint_1 + self.hysteresis_1*(1 - (self.cycle_duration_s/(self.tto*60)))
+        return dynamic_reference
+    
+    def calculate_power(self):
+        self.power["compressor"] = self.compressor_max_power * ((self.compressor_speed / self.max_speed)**0.5)
+
+    def calculate_heat_capacity_rates(self):
+        # Heat capacity rates (thermal coupling) measured in W/K
+        self.heat_capacity_rate[self.coupling_key("cabinet_1", "cabinet_2")] = self.damper_action * 0.025
+        self.heat_capacity_rate[self.coupling_key("cabinet_1", "ambient")] = 0.005 + (self.cabinet_1_door_state * 0.05)
+        self.heat_capacity_rate[self.coupling_key("cabinet_2", "ambient")] = 0.01 + (self.cabinet_2_door_state * 0.05)
+        self.heat_capacity_rate[self.coupling_key("cabinet_1", "food_1")] = 1
+        self.heat_capacity_rate[self.coupling_key("cabinet_2", "food_2")] = 1
+
 
     def simulate(self, time_step_s):
-        #Input values
-        specific_volume = {}
-        specific_volume["condenser_out"] = self.b2 + self.b1*self.temperature_k["condenser_out"]
 
-        self.enthalpy["condenser_out"] = self.a5 + self.a4 * self.temperature_k["condenser_out"]
-
-        pressure = {}
-        pressure["condenser_refrigerant"] = self.c3 + \
-                                            self.c2 * self.temperature_k["condenser_refrigerant"] + \
-                                            self.c1*self.temperature_k["condenser_refrigerant"]*self.temperature_k["condenser_refrigerant"]
-        pressure["evaporator_refrigerant"] = self.c3 + \
-                                             self.c2 * self.temperature_k["evaporator_refrigerant"] + \
-                                             self.c1*self.temperature_k["evaporator_refrigerant"]*self.temperature_k["evaporator_refrigerant"]
+        if(self.control_type == "ON_OFF"):
+            self.on_off_control()
+            if(self.voltage_fault_state):
+                self.voltage_fault_duration_s += time_step_s
+            else:
+                self.voltage_fault_duration_s = 0
+            if(self.voltage_fault_duration_s > self.voltage_fault_duration_trigger_s):
+                self.compressor_speed = 0
+            
+        elif(self.control_type == "VCC"):
+            self.vcc_control(time_step_s)
+        else:
+            self.compressor_speed = 0
+            self.damper_action = 0
         
-        # Expansion valve
-        tmp_a = self.expansion_valve_area*self.expansion_valve_level
-        tmp_b = 2*(pressure["condenser_refrigerant"] - pressure["evaporator_refrigerant"])/specific_volume["condenser_out"]
-        self.heat_capacity_rate[self.coupling_key("expansion_valve", "refrigerant")] =  abs(tmp_a*(tmp_b**0.5))
-        
-        # Compressor
-        # compressor_volumetric_efficiency
-        nv = 1 + self.c0 - self.c0*(pressure["condenser_refrigerant"]/pressure["evaporator_refrigerant"])**(1/self.n)
-
-        power = {}
-        power["compressor"] = (self.n/(1-self.n))*nv*pressure["evaporator_refrigerant"]*self.compressor_speed*(1-((pressure["condenser_refrigerant"]/pressure["evaporator_refrigerant"])**(self.n-1/self.n)))
-
-        a = (27*self.R*(self.Tcrit**2))/(64*self.Pcrit)
-        b = self.R*self.Tcrit/(8*self.Pcrit)
-        specific_volume["evaporator_out"] = self.calculate_evap_out_volume(pressure["evaporator_refrigerant"], self.temperature_k["evaporator_refrigerant"], a, b, self.R/1000)
-        self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")] = ((nv*self.cv)/specific_volume["evaporator_out"])*self.compressor_speed
-
-
-        #Calculate auxiliary variables
+        self.calculate_power()
+        self.calculate_heat_capacity_rates()
 
         #Energy variation
         delta_energy = {}
-        delta_energy["compartment"] = time_step * \
-                                      (self.heat_transfer_rate_get("evaporator_air", "compartment") + \
-                                       self.heat_transfer_rate_get("ambient", "compartment"))
-        delta_energy["evaporator_air"] = time_step * \
-                                         (self.heat_transfer_rate_get("compartment", "evaporator_air") + \
-                                          self.heat_transfer_rate_get("evaporator_refrigerant", "evaporator_air"))
-        delta_energy["condenser_air"] = time_step * \
-                                        (self.heat_transfer_rate_get("ambient", "condenser_air") + \
-                                         self.heat_transfer_rate_get("evaporator_refrigerant", "evaporator_air") + \
-                                         power["compressor"])
-        delta_energy["compressor"] = time_step * power["compressor"]
-        delta_energy["subcooling"] = time_step * \
-                                     (self.heat_transfer_rate_get("evaporator_air", "evaporator_refrigerant") + \
-                                      power["compressor"] -\
-                                      self.heat_transfer_rate_get("condenser_refrigerant", "condenser_air"))
-
-        #Enthalpy
-        self.enthalpy["condenser_out"] = self.a5 + self.a4 * self.temperature_k["condenser_out"]
-        self.enthalpy["evaporator_in"] = self.enthalpy["condenser_out"]
-        self.enthalpy["evaporator_refrigerant_vapour"] = self.a3 + \
-                                                    self.a2 * self.temperature_k["evaporator_refrigerant"] + \
-                                                    self.a1 * self.temperature_k["evaporator_refrigerant"] * self.temperature_k["evaporator_refrigerant"]
-        self.enthalpy["evaporator_refrigerant_liquid"] = self.a5 + \
-                                                    self.a4 * self.temperature_k["evaporator_refrigerant"]
-
-        self.enthalpy["evaporator_out"] = 2*self.enthalpy["evaporator_refrigerant"] - self.enthalpy["evaporator_in"]
-
-        if self.compressor_speed == 0:
-            self.enthalpy["condenser_in"] = self.enthalpy["evaporator_out"]
-        else:
-            self.enthalpy["condenser_in"] = self.enthalpy["evaporator_out"] + power["compressor"]*self.cpr/self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")]
-
-        #Refrigerant quality
-        refrigerant_quality = {}
-        refrigerant_quality["evaporator_in"] = (self.enthalpy["evaporator_in"] - self.enthalpy["evaporator_refrigerant_liquid"]) / \
-                                               (self.enthalpy["evaporator_refrigerant_vapour"] - self.enthalpy["evaporator_refrigerant_liquid"])
-        refrigerant_quality["evaporator_refrigerant"] = (refrigerant_quality["evaporator_in"] + 1)/2
-        refrigerant_quality["condenser_refrigerant"] = 0.5
-
-        #Mass variation
-        delta_mass = {}
-        delta_mass["evaporator_refrigerant"] = (self.heat_capacity_rate[self.coupling_key("expansion_valve", "refrigerant")] - \
-                                                self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")])/self.cpr
-        delta_mass["condenser_refrigerant"] = -delta_mass["evaporator_refrigerant"]
-
-        #Enthalpy variation
-        delta_enthalpy = {}
-        tmp_a = (self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")]*self.enthalpy["evaporator_in"] - \
-                 self.heat_capacity_rate[self.coupling_key("expansion_valve", "refrigerant")]*self.enthalpy["evaporator_out"]) / self.cpr
-        tmp_b = self.heat_transfer_rate_get("evaporator_air","evaporator_refrigerant")
-        tmp_c = -self.enthalpy["evaporator_refrigerant"]*delta_mass["evaporator_refrigerant"]
-        delta_enthalpy["evaporator_refrigerant"] = time_step*(tmp_a + tmp_b + tmp_c)/self.mass["evaporator_refrigerant"]
-
-        if(self.compressor_speed == 0):
-            tmp_a = 0
-            tmp_b = (self.heat_transfer_rate_get("condenser_air","condenser_refrigerant"))
-            tmp_c = 0
-        else:
-            tmp_a = (self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")]*self.enthalpy["condenser_in"] - \
-                    self.heat_capacity_rate[self.coupling_key("expansion_valve", "refrigerant")]*self.enthalpy["condenser_out"]) / self.cpr
-            tmp_b = -(self.heat_transfer_rate_get("evaporator_air","evaporator_refrigerant") + power["compressor"])
-            tmp_c = -self.enthalpy["condenser_refrigerant"]*delta_mass["condenser_refrigerant"]
-        delta_enthalpy["condenser_refrigerant"] = time_step*(tmp_a + tmp_b + tmp_c)/self.mass["condenser_refrigerant"]
-
-        c4 = self.a4*(1-refrigerant_quality["evaporator_refrigerant"]) + \
-             self.a1*2*refrigerant_quality["evaporator_refrigerant"]*self.temperature_k["evaporator_refrigerant"] + \
-             self.a2*refrigerant_quality["evaporator_refrigerant"]
-        
-        c7 = self.a4*(1-refrigerant_quality["condenser_refrigerant"]) + \
-             self.a1*2*refrigerant_quality["condenser_refrigerant"]*self.temperature_k["condenser_refrigerant"] + \
-             self.a2*refrigerant_quality["condenser_refrigerant"]
+        delta_energy["ambient"] = 0
+        delta_energy["cabinet_1"] = time_step * \
+                                      (self.heat_transfer_rate_get("ambient", "cabinet_1")  - \
+                                       (self.power["compressor"] * 0.001))
+        delta_energy["cabinet_2"] = time_step * \
+                                      (self.heat_transfer_rate_get("ambient", "cabinet_2")  + \
+                                       self.heat_transfer_rate_get("cabinet_1", "cabinet_2"))
+        delta_energy["food_1"] = time_step * self.heat_transfer_rate_get("cabinet_1", "food_1")
+        delta_energy["food_2"] = time_step * self.heat_transfer_rate_get("cabinet_2", "food_2")
 
 
-        #Calculate temperature deltas
-        delta_temperature = {}
-        delta_temperature["compartment"] = delta_energy["compartment"]/(self.mass["compartment"] * self.specific_heat["compartment"])
-        delta_temperature["evaporator_air"] = delta_energy["evaporator_air"]/(self.mass["evaporator_air"] * self.specific_heat["evaporator_air"])
-        delta_temperature["condenser_air"] = delta_energy["condenser_air"]/(self.mass["condenser_air"] * self.specific_heat["condenser_air"])
-        delta_temperature["evaporator_refrigerant"] = delta_enthalpy["evaporator_refrigerant"]/c4
-        delta_temperature["condenser_refrigerant"] = delta_enthalpy["condenser_refrigerant"]/c7
-        
-        if self.compressor_speed == 0:
-            delta_temperature["subcooling"] = 0
-        else:
-            delta_temperature["subcooling"] = delta_energy["subcooling"]/self.heat_capacity_rate[self.coupling_key("compressor", "refrigerant")]
-
-        
-        
         #Apply timestep
-        self.temperature_k["compartment"] += delta_temperature["compartment"]
-        self.temperature_k["evaporator_air"] += delta_temperature["evaporator_air"]
-        self.temperature_k["condenser_air"] += delta_temperature["condenser_air"]
-        self.temperature_k["evaporator_refrigerant"] += delta_temperature["evaporator_refrigerant"]
-        self.temperature_k["condenser_refrigerant"] += delta_temperature["condenser_refrigerant"]
-        self.temperature_k["condenser_out"] = self.temperature_k["condenser_refrigerant"] - delta_temperature["subcooling"]
-
-        self.mass["evaporator_refrigerant"] += delta_mass["evaporator_refrigerant"]
-        self.mass["condenser_refrigerant"] += delta_mass["condenser_refrigerant"]
-
-        self.enthalpy["evaporator_refrigerant"] += delta_enthalpy["evaporator_refrigerant"]
-        self.enthalpy["condenser_refrigerant"] += delta_enthalpy["condenser_refrigerant"]
-
-
+        for key in self.temperature:
+            if(self.mass[key] != 0):
+                self.temperature[key] += delta_energy[key]/(self.mass[key] * self.specific_heat[key])
 
     #Get the heat transfer rate from body1 to body2
     #  heat transfer rate -> W
     #  heat capacity rate -> W/Celsius
     def heat_transfer_rate_get(self, body1, body2):
-        delta_temperature = self.temperature_k[body1] - self.temperature_k[body2]
+        delta_temperature = self.temperature[body1] - self.temperature[body2]
         return delta_temperature*self.heat_capacity_rate[self.coupling_key(body1, body2)]
     
     def coupling_key(self, str1, str2):
         return tuple(sorted((str1, str2)))
     
-    def refrigerant_selection(self, selection):
-        if selection == "R12":
-            self.a1 = -0.00079898
-            self.a2 =  0.42074
-            self.a3 =  187.58
-            self.a4 =  0.94094
-            self.a5 =  36.772
-
-            self.b1 = 1.7979e-6
-            self.b2 = 0.00072218
-
-            self.c1 = 0.00013694
-            self.c2 = 0.011086
-            self.c3 = 0.30459
-
-            self.R_hv = 0.99996
-            self.R_hl = 0.99975
-            self.R_vl = 0.99442
-
-            self.R_psat = 0.99949
-            self.Pcrit = 4115
-            self.Tcrit = 385.15
-            self.M = 120.93
-
-            self.cpr = 0.612
-
-        elif selection == "R134a":
-            self.a1 = -0.0019937
-            self.a2 =  0.56359
-            self.a3 =  247.85
-            self.a4 =  1.5408
-            self.a5 =  54.332
-
-            self.b1 = 2.3877e-6
-            self.b2 = 0.00078627
-
-            self.c1 = 0.00025045
-            self.c2 = 0.011438
-            self.c3 = 0.20888
-
-            self.R_hv = 0.99919
-            self.R_hl = 0.99451
-            self.R_vl = 0.98632
-
-            self.R_psat = 0.99801
-            self.Pcrit = 4060.3
-            self.Tcrit = 374.23
-            self.M = 102.03
-
-            self.cpr = 0.9
-
-        else:
-            self.a1 = -0.0019937
-            self.a2 =  0.56359
-            self.a3 =  247.85
-            self.a4 =  1.5408
-            self.a5 =  54.332
-
-            self.b1 = 2.3877e-6
-            self.b2 = 0.00078627
-
-            self.c1 = 0.00025045
-            self.c2 = 0.011438
-            self.c3 = 0.20888
-
-            self.R_hv = 0.99919
-            self.R_hl = 0.99451
-            self.R_vl = 0.98632
-
-            self.R_psat = 0.99801
-            self.Pcrit = 4060.3
-            self.Tcrit = 374.23
-            self.M = 102.03
-
-            self.cpr = 0.9
-
-    def calculate_evap_out_volume(self, P, T, a, b, R):
-        # Coefficients for the cubic equation PV_m^3 - (RT + Pb)V_m^2 + aV_m - ab = 0
-        A = P
-        B = -(R * T + P * b)
-        C = a
-        D = -a * b
-
-        # Coefficients array for the polynomial
-        coefficients = [A, B, C, D]
-
-        # Finding the roots of the cubic equation
-        roots = np.roots(coefficients)
-
-        # Return the real roots (ignoring complex roots)
-        real_roots = [root.real for root in roots if np.isreal(root)]
-
-        return real_roots[0]
 
 # Example usage:
 if __name__ == "__main__":
-    simulator = RefrigerationSystem("R134a")
-    time_step = 1  # Time step for simulation (in seconds)
 
-    num_steps = 60000
+    args = vars(parser.parse_args())
+
+    system = args['system']
+    control = args['control']
+
+    simulator = RefrigerationSystem(system, control)
+    time_step = 60  # Time step for simulation (in seconds)
+
+    num_steps = 60*24 # 1 day of simulation
 
     # Initialize the data arrays
-    t_compartment = np.zeros(num_steps)
-    t_evaporator_refrigerant = np.zeros(num_steps)
-    t_condenser_refrigerant = np.zeros(num_steps)
-    t_evaporator_air = np.zeros(num_steps)
-    t_condenser_air = np.zeros(num_steps)
+    t_ambient = np.zeros(num_steps)
+    t_cabinet_1 = np.zeros(num_steps)
+    t_food_1 = np.zeros(num_steps)
+    if(system == "house_refrigerator"):
+        t_cabinet_2 = np.zeros(num_steps)
+        t_food_2 = np.zeros(num_steps)
+    t_speed = np.zeros(num_steps)
+    t_reference = np.zeros(num_steps)
 
     # Simulate heat transfer for 100 time steps
     for i in range(num_steps):
-        if i>20000:
-            simulator.compressor_speed = 2000
         simulator.simulate(time_step)
-        t_compartment[i] = simulator.temperature_k["compartment"]-273.15
-        t_evaporator_refrigerant[i] = simulator.temperature_k["evaporator_refrigerant"]-273.15
-        t_condenser_refrigerant[i] = simulator.temperature_k["condenser_refrigerant"]-273.15
-        t_evaporator_air[i] = simulator.temperature_k["evaporator_air"]-273.15
-        t_condenser_air[i] = simulator.temperature_k["condenser_air"]-273.15
+        t_ambient[i] = simulator.temperature["ambient"]
+        t_cabinet_1[i] = simulator.temperature["cabinet_1"]
+        t_food_1[i] = simulator.temperature["food_1"]
+        if(system == "house_refrigerator"):
+            t_cabinet_2[i] = simulator.temperature["cabinet_2"]
+            t_food_2[i] = simulator.temperature["food_2"]
 
-        #print("Compartment temperature: T1 =", round(simulator.temperature_k["compartment"]-273.15,2))
+        t_speed[i] = simulator.compressor_speed/100
+
+        t_reference[i] = simulator.setpoint_1
 
     
     # Plotting the results
     plt.figure(figsize=(10, 6))
-    plt.plot(t_compartment, label='Compartment')
-    plt.plot(t_evaporator_refrigerant, label='Evaporator Refrigerant')
-    plt.plot(t_evaporator_air, label='Evaporator Air')
-    plt.plot(t_condenser_refrigerant, label='Condenser Refrigerant')
-    plt.plot(t_condenser_air, label='Condenser Air')
+    plt.plot(t_ambient, label='Ambient')
+    plt.plot(t_cabinet_1, label='Cabinet 1')
+    plt.plot(t_food_1, label='Food 1')
+    if(system == "house_refrigerator"):
+        plt.plot(t_cabinet_2, label='Cabinet 2')
+        plt.plot(t_food_2, label='Food 2')
+    plt.plot(t_speed, label='Speed/100')
+    plt.plot(t_reference, label='Reference')
     plt.title('Simulation of Refrigeration System')
-    plt.xlabel('Step')
+    plt.xlabel('Minutes')
     plt.ylabel('Value')
     plt.legend()
     plt.show()
